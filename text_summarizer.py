@@ -21,25 +21,22 @@ from tensorflow.keras.layers import Input,LSTM,Embedding,Dense,Concatenate,Atten
 from sklearn.model_selection import train_test_split
 from bs4 import BeautifulSoup
 
-# 1. Quietly ensure Kaggle knows who you are (Safe to leave this)
-os.environ['KAGGLE_USERNAME'] = 'your_kaggle_username' 
+os.environ['KAGGLE_USERNAME'] = 'kausthubhdarbha' 
 os.environ['KAGGLE_KEY'] = 'KGAT_b194539e027e8c84efaa3a36cf906407'
 
 print("Loading Amazon Fine Food Reviews...")
 
-# 2. This instantly locates the files on your Mac (No redownloading!)
 path = kagglehub.dataset_download("snap/amazon-fine-food-reviews")
 csv_path = os.path.join(path, "Reviews.csv")
 
-# 3. Load the data (Let's only read the first 50,000 rows so your Mac doesn't lag!)
-# The full dataset has over 500,000 rows!
+# 3. Load the data ( only read the first 50,000 rows)
 df = pd.read_csv(csv_path, nrows=50000)
 
 df.drop_duplicates(subset = ['Text'], inplace = True)
 df.dropna(axis = 0, inplace = True)
 input_data = df.loc[:, 'Text']
 target_data = df.loc[:,'Summary']
-target.replace('', np.nan, inplace = True)
+target_data.replace('', np.nan, inplace = True)
 
 print(f"Loaded {len(df)} reviews into the dataframe.")
 
