@@ -21,6 +21,7 @@ from tensorflow.keras.utils import plot_model
 from tensorflow.keras.layers import Input,LSTM,Embedding,Dense,Concatenate,Attention
 from sklearn.model_selection import train_test_split
 from bs4 import BeautifulSoup
+import json
 
 os.environ['KAGGLE_USERNAME'] = 'kausthubhdarbha' 
 os.environ['KAGGLE_KEY'] = 'KGAT_b194539e027e8c84efaa3a36cf906407'
@@ -43,26 +44,8 @@ input_texts = []
 target_texts = []
 input_words = []
 target_words = []
-contractions_dict = {
-    "ain't": "am not", "aren't": "are not", "can't": "cannot", "can't've": "cannot have",
-    "'cause": "because", "could've": "could have", "couldn't": "could not", "couldn't've": "could not have",
-    "didn't": "did not", "doesn't": "does not", "don't": "do not", "hadn't": "had not",
-    "hadn't've": "had not have", "hasn't": "has not", "haven't": "have not", "he'd": "he would",
-    "he'd've": "he would have", "he'll": "he will", "he's": "he is", "how'd": "how did",
-    "how_ll": "how will", "how_s": "how is", "i'd": "i would", "i'll": "i will",
-    "i'm": "i am", "i've": "i have", "isn't": "is not", "it'd": "it would",
-    "it'll": "it will", "it's": "it is", "let's": "let us", "ma'am": "madam",
-    "mayn't": "may not", "might've": "might have", "mightn't": "might not", "must've": "must have",
-    "mustn't": "must not", "needn't": "need not", "oughtn't": "ought not", "shan't": "shall not",
-    "sha'n't": "shall not", "she'd": "she would", "she'll": "she will", "she's": "she is",
-    "should've": "should have", "shouldn't": "should not", "that's": "that is", "there's": "there is",
-    "they'd": "they would", "they'll": "they will", "they're": "they are", "they've": "they have",
-    "wasn't": "was not", "we'd": "we would", "we'll": "we will", "we're": "we are",
-    "we've": "we have", "weren't": "were not", "what'll": "what will", "what_re": "what are",
-    "what's": "what is", "what_ve": "what have", "when's": "when is", "where's": "where is",
-    "who'll": "who will", "who's": "who is", "won't": "will not", "wouldn't": "would not",
-    "you'd": "you would", "you'll": "you will", "you're": "you are", "you've": "you have"
-}
+with open("contractions.json", "r") as f:
+    contractions_dict = json.load(f)
 stop_words = set(stopwords.words('english'))
 stemm = LancasterStemmer()
 
@@ -112,6 +95,8 @@ print("maximum target length : ",max_tr_len)
 
 print(f"Loaded {len(df)} reviews into the dataframe.")
 
+#creating train test splits (80 - 20)
+x_train, x_test, y_train, y_test = train_test_split(input_texts, target_texts, test_size=0.2, random_state=0)
 
 
 # ==========================================
@@ -119,5 +104,5 @@ print(f"Loaded {len(df)} reviews into the dataframe.")
 # ==========================================
 
 # Let's see what we are working with
-print("\nSample Data:")
-print(df[['Summary', 'Text']].head())
+#print("\nSample Data:")
+#print(df[['Summary', 'Text']].head())
