@@ -104,6 +104,9 @@ in_tokenizer.fit_on_texts(x_train)
 tr_tokenizer = Tokenizer()
 tr_tokenizer.fit_on_texts(y_train)
 
+num_in_words = len(in_tokenizer.word_index)
+num_tr_words = len(tr_tokenizer.word_index)
+
 #convert text into seq of integers, interger represents index of word
 x_train = in_tokenizer.texts_to_sequence(x_train)
 y_train = tr_tokenizer.texts_to_sequence(y_train)
@@ -116,6 +119,49 @@ dec_data = pad_sequences(y_train, maxlen = max_tr_len, padding = 'post')
 dec_in_data = dec_data[:,:-1]
 dec_tr_data = dec_data.reshape(len(dec_data), max_tr_len,1)[:,1:]
 
+K.clear_session()
+latent_dim = 500
+
+#create input objects of total number of encoder words
+en_inputs = Input(shape=(max_in_len,))
+en_embedding = Embedding(num_in_words+1, latent_dim)(en_inputs)
+
+#create 3 stacked LSTM layers 
+
+#LSTM 1
+en_lstml = LSTM(latent_dim, return_state = True, return_sequences = True)
+en_outputs1, state_h1, state_c1 = en_lstml(en_embedding)
+
+#LSTM 2
+en_lstm2 = LSTM(latent_dim, return_state = True, return_sequences = True)
+en_outputs2, state_h2, state_c2 = en_lstm2(en_outputs1)
+
+#LSTM 3
+en_lstm3 = LSTM(latent_dim, return_sequences = True, return_state = True)
+en_outputs3, state_h3, state_c3 = en_lstm3(en_outputs2)
+
+#encoder states
+en_states = [state_h3, state_c3]
+
+# Decoder. 
+dec_inputs = Input(shape=(None,)) 
+dec_emb_layer = Embedding(num_tr_words+1, latent_dim) 
+dec_embedding = dec_emb_layer(dec_inputs) 
+ 
+#initialize decoder's LSTM layer with the output states of encoder
+dec_lstm = LSTM(latent_dim, return_sequences=True, return_state=True)
+dec_outputs, *_ = dec_lstm(dec_embedding,initial_state=en_states)
+
+#Attention layer
+attention =Attention()
+attn_out = attention([dec_outputs,en_outputs3])
+ 
+#Concatenate the attention output with the decoder outputs
+merge=Concatenate(axis=-1, name='concat_layer1')([dec_outputs,attn_out])
+
+#Dense layer (output layer)
+dec_dense = Dense(num_tr_words+1, activation='softmax') 
+dec_outputs = dec_dense(merge) 
 # ==========================================
 # YOUR ML TEXT SUMMARIZATION CODE GOES HERE
 # ==========================================
