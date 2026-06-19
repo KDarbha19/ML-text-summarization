@@ -98,6 +98,23 @@ print(f"Loaded {len(df)} reviews into the dataframe.")
 #creating train test splits (80 - 20)
 x_train, x_test, y_train, y_test = train_test_split(input_texts, target_texts, test_size=0.2, random_state=0)
 
+#train the tokenizer with all the words
+in_tokenizer = Tokenizer()
+in_tokenizer.fit_on_texts(x_train)
+tr_tokenizer = Tokenizer()
+tr_tokenizer.fit_on_texts(y_train)
+
+#convert text into seq of integers, interger represents index of word
+x_train = in_tokenizer.texts_to_sequence(x_train)
+y_train = tr_tokenizer.texts_to_sequence(y_train)
+
+#pad array of 0's if length is less than max length
+en_in_data = pad_sequences(x_train, maxlen = max_in_len, padding = 'post')
+dec_data = pad_sequences(y_train, maxlen = max_tr_len, padding = 'post')
+
+#decoder input data != last word(eos) decoder target data != first word(sos)
+dec_in_data = dec_data[:,:-1]
+dec_tr_data = dec_data.reshape(len(dec_data), max_tr_len,1)[:,1:]
 
 # ==========================================
 # YOUR ML TEXT SUMMARIZATION CODE GOES HERE
