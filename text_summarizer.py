@@ -181,6 +181,36 @@ model.fit(
 
 model.save("s2s.keras")
 
+#encoder inference
+latent_dim = 256
+
+#load model
+model = models.load_model("variables/s2s.keras", custom_objects={"Attention": Attention})
+
+#construct encoder model from the output of 6 later
+en_outputs3 = model.get_layer("lstm_2").output[0] #3rd LSTM layer
+state_h_enc = model.get_layer("lstm_2").output[1] #Final hidden atate
+state_c_enc = model.get_layer("lstm_2").output[2] #Final cell state
+
+en_states = [state_h_enc,state_c_enc]
+
+#add input and state from the layer
+en_model = Model(model.input[0], [en_outputs3, state_h_enc, state_c_enc])
+
+#decoder inference
+dec_inputs = model.input[1]
+dec_emb_layer = model.get_layer("embedding_1")
+dec_embedding = dec_emb_layer(dec_inputs)
+
+#define states 
+dec_state_input_h = Input(shape=(latent_dim,), name = "decoder_state_h")
+dec_state_input_c = Input(shape=(latent_dim,), name = "decoder_state_c")
+dec_states_inputs = [dec_state_input_h, dec_state_input_c]
+
+#Decode LSTM layer 
+dec_lstm = model.get_layer("lstm_3")
+dec_outputs2, state_h2,state_c2 = dec_lstm(dec_embedding, initial_state = dec_states_inputs)
+
 # ==========================================
 # YOUR ML TEXT SUMMARIZATION CODE GOES HERE
 # ==========================================
