@@ -33,6 +33,7 @@ csv_path = os.path.join(path, "Reviews.csv")
 
 # 3. Load the data ( only read the first 50,000 rows)
 df = pd.read_csv(csv_path, nrows=50000)
+df = df.head(10000)
 
 df.drop_duplicates(subset = ['Text'], inplace = True)
 df.dropna(axis = 0, inplace = True)
@@ -108,8 +109,8 @@ num_in_words = len(in_tokenizer.word_index)
 num_tr_words = len(tr_tokenizer.word_index)
 
 #convert text into seq of integers, interger represents index of word
-x_train = in_tokenizer.texts_to_sequence(x_train)
-y_train = tr_tokenizer.texts_to_sequence(y_train)
+x_train = in_tokenizer.texts_to_sequences(x_train)
+y_train = tr_tokenizer.texts_to_sequences(y_train)
 
 #pad array of 0's if length is less than max length
 en_in_data = pad_sequences(x_train, maxlen = max_in_len, padding = 'post')
@@ -117,10 +118,11 @@ dec_data = pad_sequences(y_train, maxlen = max_tr_len, padding = 'post')
 
 #decoder input data != last word(eos) decoder target data != first word(sos)
 dec_in_data = dec_data[:,:-1]
-dec_tr_data = dec_data.reshape(len(dec_data), max_tr_len,1)[:,1:]
+dec_tr_sliced = dec_data[:, 1:]
+dec_tr_data = dec_tr_sliced.reshape(len(dec_data), max_tr_len - 1,1)
 
 K.clear_session()
-latent_dim = 500
+latent_dim = 256
 
 #create input objects of total number of encoder words
 en_inputs = Input(shape=(max_in_len,))
@@ -162,6 +164,23 @@ merge=Concatenate(axis=-1, name='concat_layer1')([dec_outputs,attn_out])
 #Dense layer (output layer)
 dec_dense = Dense(num_tr_words+1, activation='softmax') 
 dec_outputs = dec_dense(merge) 
+
+#Model class and model summary 
+model = Model([en_inputs, dec_inputs], dec_outputs)
+model.summary()
+#plot_model(model, to_file = 'model_plot.png', show_shapes = True, show_layer_names = True)
+
+model.compile(optimizer = "rmsprop", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+model.fit(
+    [en_in_data, dec_in_data], 
+    dec_tr_data, 
+    batch_size = 256, 
+    epochs = 10, 
+    validation_split=0.1,
+)
+
+model.save("s2s.keras")
+
 # ==========================================
 # YOUR ML TEXT SUMMARIZATION CODE GOES HERE
 # ==========================================
