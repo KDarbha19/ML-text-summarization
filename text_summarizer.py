@@ -205,12 +205,30 @@ dec_embedding = dec_emb_layer(dec_inputs)
 #define states 
 dec_state_input_h = Input(shape=(latent_dim,), name = "decoder_state_h")
 dec_state_input_c = Input(shape=(latent_dim,), name = "decoder_state_c")
+dec_hidden_state_input = Input(shape=(max_in_len, latent_dim))
 dec_states_inputs = [dec_state_input_h, dec_state_input_c]
 
 #Decode LSTM layer 
 dec_lstm = model.get_layer("lstm_3")
 dec_outputs2, state_h2,state_c2 = dec_lstm(dec_embedding, initial_state = dec_states_inputs)
 
+#Attention Layer
+attention = model.get_layer("attention")
+attn_out2 = attention([dec_outputs2, dec_hidden_state_input])
+
+#concatenate layer
+concat_layer = model.get_layer("concat_layer1")
+merge2 = concat_layer([dec_outputs2, attn_out2])
+
+#Dense Layer
+dec_dense = model.get_layer("dense")
+dec_outputs2 = dec_dense(merge2)
+
+#Defining model class
+dec_model = Model(
+    [dec_inputs] + [dec_hidden_state_input, dec_state_input_h, dec_state_input_c],
+    [dec_outputs2] + [state_h2, state_c2]
+)
 # ==========================================
 # YOUR ML TEXT SUMMARIZATION CODE GOES HERE
 # ==========================================
