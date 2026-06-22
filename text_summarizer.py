@@ -229,6 +229,53 @@ dec_model = Model(
     [dec_inputs] + [dec_hidden_state_input, dec_state_input_h, dec_state_input_c],
     [dec_outputs2] + [state_h2, state_c2]
 )
+
+
+
+#create a dictionary with a key as index and value as words.
+reverse_target_word_index = tr_tokenizer.index_word
+reverse_source_word_index = in_tokenizer.index_word
+target_word_index = tr_tokenizer.word_index
+reverse_target_word_index[0]=' '
+ 
+def decode_sequence(input_seq):
+    #get the encoder output and states by passing the input sequence
+    en_out, en_h, en_c= en_model.predict(input_seq, verbose = 0)
+ 
+    #target sequence with initial word as 'sos'
+    target_seq = np.zeros((1, 1))
+    target_seq[0, 0] = target_word_index['sos']
+ 
+    #if the iteration reaches the end of text than it will be stop the iteration
+    stop_condition = False
+    #append every predicted word in decoded sentence
+    decoded_sentence = ""
+    while not stop_condition: 
+        #get predicted output, hidden and cell state.
+        output_words, dec_h, dec_c= dec_model.predict([target_seq] + [en_out,en_h, en_c], verbose = 0)
+        
+        #get the index and from the dictionary get the word for that index.
+        word_index = np.argmax(output_words[0, -1, :])
+        text_word = reverse_target_word_index[word_index]
+
+        if text_word == 'eos':
+            stop_condition = True
+            break
+        
+        if word_index != 0:
+            decoded_sentence += text_word + " "
+
+        if len(decoded_sentence.split()) >= max_tr_len:
+            stop_condition = True
+            break
+        
+        target_seq = np.zeros((1,1))
+        target_seq[0,0] = word_index
+        en_h, en_c = dec_h, dec_c
+    
+    return decoded_sentence.strip()
+
+
 # ==========================================
 # YOUR ML TEXT SUMMARIZATION CODE GOES HERE
 # ==========================================
