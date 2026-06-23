@@ -33,7 +33,7 @@ csv_path = os.path.join(path, "Reviews.csv")
 
 # 3. Load the data ( only read the first 50,000 rows)
 df = pd.read_csv(csv_path, nrows=50000)
-df = df.head(10000)
+df = df.head(20000)
 
 df.drop_duplicates(subset = ['Text'], inplace = True)
 df.dropna(axis = 0, inplace = True)
@@ -175,7 +175,7 @@ model.fit(
     [en_in_data, dec_in_data], 
     dec_tr_data, 
     batch_size = 256, 
-    epochs = 10, 
+    epochs = 20, 
     validation_split=0.1,
 )
 
@@ -255,7 +255,13 @@ def decode_sequence(input_seq):
         output_words, dec_h, dec_c= dec_model.predict([target_seq] + [en_out,en_h, en_c], verbose = 0)
         
         #get the index and from the dictionary get the word for that index.
-        word_index = np.argmax(output_words[0, -1, :])
+        preds = output_words[0, -1, :]
+        temperature = 0.7
+        preds = np.log(preds + 1e-10) / temperature
+        exp_preds = np.exp(preds)
+        preds = exp_preds / np.sum(exp_preds)
+
+        word_index = np.random.choice(range(len(preds)), p = preds)
         text_word = reverse_target_word_index[word_index]
 
         if text_word == 'eos':
@@ -275,7 +281,18 @@ def decode_sequence(input_seq):
     
     return decoded_sentence.strip()
 
+inp_review = input("Enter : ")
+print("Review: ", inp_review)
+inp_review = clean(inp_review, "inputs")
+inp_review = ' '.join(inp_review)
+inp_x = in_tokenizer.texts_to_sequences([inp_review])
+inp_x = pad_sequences(inp_x, maxlen = max_in_len, padding = 'post')
 
+summary = decode_sequence(inp_x.reshape(1, max_in_len))
+if 'eos' in summary:
+    summary = summary.replace('eos', '')
+
+print("\nPredicted summary: ", summary);print("\n")
 # ==========================================
 # YOUR ML TEXT SUMMARIZATION CODE GOES HERE
 # ==========================================
