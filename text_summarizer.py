@@ -1,9 +1,9 @@
 import os
-import kagglehub
-import pandas as pd
-import numpy as np 
 import json
-from statistics import mode 
+import pickle
+import numpy as np
+import pandas as pd
+import torch
 import nltk
 from nltk import word_tokenize
 nltk.download('wordnet')
@@ -11,248 +11,253 @@ nltk.download('stopwords')
 nltk.download('punkt')
 nltk.download('punkt_tab')
 from nltk.corpus import stopwords
-from tensorflow.keras.models import Model
-from tensorflow.keras import models
-from tensorflow.keras import backend as K
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.preprocessing.text import Tokenizer 
-from tensorflow.keras.layers import Input, LSTM, Embedding, Dense, Concatenate, Attention
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-from sklearn.model_selection import train_test_split
 from bs4 import BeautifulSoup
+import kagglehub
+from sklearn.model_selection import train_test_split
+from datasets import Dataset
+from transformers import (
+    T5ForConditionalGeneration,
+    T5Tokenizer,
+    Trainer,
+    TrainingArguments,
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback
+)
+from rouge_score import rouge_scorer
 
-os.environ['KAGGLE_USERNAME'] = 'kausthubhdarbha' 
+os.environ['KAGGLE_USERNAME'] = 'kausthubhdarbha'
 os.environ['KAGGLE_KEY'] = 'KGAT_b194539e027e8c84efaa3a36cf906407'
 
-print("Loading Amazon Fine Food Reviews...")
+# ── 1. MPS DEVICE SETUP ───────────────────────────────────────────────────────
+device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+print(f"Using device: {device}")
+
+# ── 2. LOAD & BALANCE DATA ────────────────────────────────────────────────────
+print("\nLoading Amazon Fine Food Reviews...")
 path = kagglehub.dataset_download("snap/amazon-fine-food-reviews")
 csv_path = os.path.join(path, "Reviews.csv")
 
-df = pd.read_csv(csv_path, nrows=120000)
+df = pd.read_csv(csv_path, nrows=170000)
 
-pos_df = df[df['Score'] >= 4].head(15000)
-neg_df = df[df['Score'] <= 2].head(15000)
+pos_df = df[df['Score'] >= 4].head(30000)
+neg_df = df[df['Score'] <= 2].head(30000)
+print(f"Pos: {len(pos_df)} | Neg: {len(neg_df)}")
 
-print("Total balanced rows available after filtering (Pos):", len(pos_df))
-print("Total balanced rows available after filtering (Neg):", len(neg_df))
 df = pd.concat([pos_df, neg_df]).sample(frac=1, random_state=0).reset_index(drop=True)
-
 df.drop_duplicates(subset=['Text'], inplace=True)
 df.dropna(axis=0, inplace=True)
-input_data = df.loc[:, 'Text']
-target_data = df.loc[:, 'Summary']
 
-input_texts = []
-target_texts = []
+# ── 3. SENTIMENT-MATCHED FILTERING ───────────────────────────────────────────
+positive_summary_words = {
+    'great','love','best','excellent','amazing','good','perfect','delicious',
+    'wonderful','fantastic','tasty','awesome','fresh','favorite','superb','outstanding'
+}
+negative_summary_words = {
+    'terrible','horrible','awful','bad','worst','disgusting','disappointed','waste',
+    'poor','gross','nasty','bland','avoid','overpriced','stale','tasteless'
+}
 
+def summary_matches_score(row):
+    summary_lower = str(row['Summary']).lower()
+    if row['Score'] >= 4:
+        return not any(w in summary_lower for w in negative_summary_words)
+    else:
+        return not any(w in summary_lower for w in positive_summary_words)
+
+df = df[df.apply(summary_matches_score, axis=1)]
+
+pos_count = len(df[df['Score'] >= 4])
+neg_count = len(df[df['Score'] <= 2])
+print(f"After sentiment filter — Pos: {pos_count} | Neg: {neg_count} | Ratio: {pos_count/neg_count:.2f}")
+
+pos_df_filtered = df[df['Score'] >= 4].sample(neg_count, random_state=0)
+neg_df_filtered = df[df['Score'] <= 2]
+df = pd.concat([pos_df_filtered, neg_df_filtered]).sample(frac=1, random_state=0).reset_index(drop=True)
+print(f"Final balanced dataset size: {len(df)}")
+
+# ── 4. CLEANING ───────────────────────────────────────────────────────────────
+# Minimal cleaning only — T5 was pretrained on natural English so we preserve
+# punctuation, case, and stopwords. Only strip HTML and expand contractions.
+# Heavy cleaning like the LSTM version would hurt T5 by breaking natural language.
 with open("contractions.json", "r") as f:
     contractions_dict = json.load(f)
-stop_words = set(stopwords.words('english'))
 
-# FIX 1: Removed stemming entirely — stemmed inputs produce unreadable summaries
-# and create a token space mismatch between encoder and decoder
-def clean(texts):
-    texts = BeautifulSoup(texts, "lxml").text.lower()
+def clean_for_t5(text):
+    text = BeautifulSoup(str(text), "lxml").text
     for word, expansion in contractions_dict.items():
-        texts = texts.replace(word, expansion)
-    words = word_tokenize(texts)
-    words = [w for w in words if w.isalpha() and len(w) >= 3]
-    words = [w for w in words if w not in stop_words]
-    return words
+        text = text.replace(word, expansion)
+    return text.strip()
 
-for in_txt, tr_txt in zip(input_data, target_data):
-    if type(tr_txt) != str:
-        continue
-    in_words = clean(in_txt)
-    input_texts.append(' '.join(in_words))
+df['clean_text']    = df['Text'].apply(clean_for_t5)
+df['clean_summary'] = df['Summary'].apply(clean_for_t5)
+df = df[df['clean_text'].str.len() > 0]
+df = df[df['clean_summary'].str.len() > 0]
 
-    tr_words = clean(tr_txt)
-    tr_words = ['sos'] + tr_words + ['eos']
-    target_texts.append(' '.join(tr_words))
+# ── 5. TRAIN / TEST SPLIT ─────────────────────────────────────────────────────
+train_texts, test_texts, train_summaries, test_summaries = train_test_split(
+    df['clean_text'].tolist(),
+    df['clean_summary'].tolist(),
+    test_size=0.2,
+    random_state=0
+)
+print(f"\nTrain: {len(train_texts)} | Test: {len(test_texts)}")
 
-eighty_in_len = int(np.percentile([len(i.split()) for i in input_texts], 80))
-eighty_tr_len = int(np.percentile([len(i.split()) for i in target_texts], 80))
-max_in_len = max(eighty_in_len, 35)
-max_tr_len = max(eighty_tr_len, 15)
+# ── 6. LOAD T5 ────────────────────────────────────────────────────────────────
+# t5-small (60M params) is the right choice for 8GB RAM with MPS.
+# It runs cleanly without memory pressure and finishes in ~4-6 min per epoch.
+MODEL_NAME = "t5-small"
+print(f"\nLoading {MODEL_NAME} tokenizer and model...")
+tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
+model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
+model = model.to(device)
+print(f"Model running on : {device}")
+print(f"Parameters       : {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 
-print("maximum input word length : ", max_in_len)
-print("maximum target word length : ", max_tr_len)
+# ── 7. TOKENIZE ───────────────────────────────────────────────────────────────
+# T5 expects inputs prefixed with the task name: "summarize: <text>"
+# This tells T5 which of its pretrained tasks to run.
+MAX_INPUT_LEN  = 128
+MAX_TARGET_LEN = 20
 
-x_train, x_test, y_train, y_test = train_test_split(input_texts, target_texts, test_size=0.2, random_state=0)
+def tokenize(input_texts, target_texts):
+    prefixed = ["summarize: " + t for t in input_texts]
+ 
+    # Tokenize inputs and targets in one call using text_target
+    tokenized = tokenizer(
+        prefixed,
+        text_target=target_texts,
+        max_length=MAX_INPUT_LEN,
+        max_target_length=MAX_TARGET_LEN,
+        truncation=True,
+        padding="max_length"
+    )
+ 
+    # Replace padding token id with -100 so the loss ignores pad tokens
+    tokenized["labels"] = [
+        [(tok if tok != tokenizer.pad_token_id else -100) for tok in label]
+        for label in tokenized["labels"]
+    ]
+    return tokenized
 
-# FIX 2: Cap vocab size so the output Dense layer isn't projecting over 50k+ words
-in_tokenizer = Tokenizer(num_words=20000, oov_token='<OOV>')
-in_tokenizer.fit_on_texts(x_train)
-tr_tokenizer = Tokenizer(num_words=8000, oov_token='<OOV>')
-tr_tokenizer.fit_on_texts(y_train)
+print("\nTokenizing training data...")
+train_tokenized = tokenize(train_texts, train_summaries)
+print("Tokenizing test data...")
+test_tokenized  = tokenize(test_texts, test_summaries)
 
-num_in_words = min(len(in_tokenizer.word_index), 20000)
-num_tr_words = min(len(tr_tokenizer.word_index), 8000)
+train_dataset = Dataset.from_dict(train_tokenized)
+test_dataset  = Dataset.from_dict(test_tokenized)
+print(f"Train dataset : {len(train_dataset)} samples")
+print(f"Test dataset  : {len(test_dataset)} samples")
 
-print("Encoder vocab size:", num_in_words)
-print("Decoder vocab size:", num_tr_words)
+# ── 8. TRAINING ───────────────────────────────────────────────────────────────
+os.makedirs("variables_t5", exist_ok=True)
 
-x_train_seq = in_tokenizer.texts_to_sequences(x_train)
-y_train_seq = tr_tokenizer.texts_to_sequences(y_train)
-
-en_in_data = pad_sequences(x_train_seq, maxlen=max_in_len, padding='post')
-dec_data = pad_sequences(y_train_seq, maxlen=max_tr_len, padding='post')
-
-dec_in_data = dec_data[:, :-1]
-dec_tr_sliced = dec_data[:, 1:]
-dec_tr_data = dec_tr_sliced.reshape(len(dec_data), max_tr_len - 1, 1)
-
-K.clear_session()
-latent_dim = 128
-
-# --- ENCODER ---
-en_inputs = Input(shape=(max_in_len,), name="encoder_inputs")
-en_embedding = Embedding(num_in_words + 1, latent_dim, mask_zero=True, name="encoder_emb")(en_inputs)
-
-en_lstm1 = LSTM(latent_dim, return_state=True, return_sequences=True, dropout=0.3, name="enc_lstm_1")
-en_outputs1, _, _ = en_lstm1(en_embedding)
-
-en_lstm2 = LSTM(latent_dim, return_state=True, return_sequences=True, dropout=0.3, name="enc_lstm_2")
-en_outputs2, _, _ = en_lstm2(en_outputs1)
-
-en_lstm3 = LSTM(latent_dim, return_sequences=True, return_state=True, dropout=0.3, name="enc_lstm_3")
-en_outputs3, state_h3, state_c3 = en_lstm3(en_outputs2)
-en_states = [state_h3, state_c3]
-
-# --- DECODER ---
-# FIX 3: Removed recurrent_dropout from decoder LSTM — re-enables CuDNN kernel,
-# cutting epoch time roughly in half with no meaningful accuracy cost
-dec_inputs = Input(shape=(None,), name="decoder_inputs")
-dec_emb_layer = Embedding(num_tr_words + 1, latent_dim, mask_zero=True, name="decoder_emb")
-dec_embedding = dec_emb_layer(dec_inputs)
-
-dec_lstm_layer = LSTM(latent_dim, return_sequences=True, return_state=True, dropout=0.3, name="decoder_lstm")
-dec_outputs, *_ = dec_lstm_layer(dec_embedding, initial_state=en_states)
-
-# --- ATTENTION & OUTPUT ---
-attention = Attention(name="attention_layer")
-attn_out = attention([dec_outputs, en_outputs3])
-
-merge = Concatenate(axis=-1, name='concat_layer1')([dec_outputs, attn_out])
-dec_dense = Dense(num_tr_words + 1, activation='softmax', name="dense_layer")
-dec_outputs = dec_dense(merge)
-
-model = Model([en_inputs, dec_inputs], dec_outputs)
-model.compile(optimizer=Adam(learning_rate=0.001), loss="sparse_categorical_crossentropy", metrics=["accuracy"])
-model.summary()
-
-# FIX 4: Added callbacks — stops training when val_loss plateaus, saves best weights,
-# and reduces LR when stuck (your previous run was overfitting from epoch 14 onward)
-os.makedirs("variables", exist_ok=True)
-callbacks = [
-    EarlyStopping(monitor='val_loss', patience=4, restore_best_weights=True, verbose=1),
-    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-5, verbose=1),
-    ModelCheckpoint('variables/best_model.keras', save_best_only=True, monitor='val_loss', verbose=1)
-]
-
-model.fit(
-    [en_in_data, dec_in_data], dec_tr_data,
-    batch_size=256,
-    epochs=25,
-    validation_split=0.1,
-    callbacks=callbacks
+training_args = TrainingArguments(
+    output_dir="variables_t5/checkpoints",
+    num_train_epochs=5,
+    per_device_train_batch_size=32,  # increased from 16 — MPS handles this fine
+    per_device_eval_batch_size=32,
+    warmup_steps=200,                # gradual LR warmup prevents early instability
+    weight_decay=0.01,               # L2 regularization
+    learning_rate=3e-4,
+    eval_strategy="epoch",
+    save_strategy="epoch",
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    logging_dir="variables_t5/logs",
+    logging_steps=50,
+    fp16=False,                      # MPS does not support fp16
+    use_cpu=False,                    # tell HuggingFace not to look for CUDA
+    report_to="none",                # disable wandb / tensorboard
 )
 
-model.save("variables/s2s.keras")
-print("\n--- MODEL TRAINED & SAVED SUCCESSFULLY. STARTING INFERENCE ---")
-
-# Load the best checkpoint (not necessarily the last epoch)
-model = models.load_model("variables/best_model.keras", custom_objects={"Attention": Attention})
-
-# FIX 5: Correct inference model construction — use model.input[0/1] instead of
-# model.get_layer("...").input which returns empty after load_model in Keras 3
-encoder_input_tensor = model.input[0]
-en_lstm3_layer = model.get_layer("enc_lstm_3")
-en_out_seq = en_lstm3_layer.output[0]
-en_state_h = en_lstm3_layer.output[1]
-en_state_c = en_lstm3_layer.output[2]
-en_model = Model(encoder_input_tensor, [en_out_seq, en_state_h, en_state_c])
-
-decoder_input_tensor = model.input[1]
-dec_emb_layer = model.get_layer("decoder_emb")
-dec_embedding_inf = dec_emb_layer(decoder_input_tensor)
-
-dec_state_input_h = Input(shape=(latent_dim,), name="inf_decoder_state_h")
-dec_state_input_c = Input(shape=(latent_dim,), name="inf_decoder_state_c")
-dec_hidden_state_input = Input(shape=(max_in_len, latent_dim), name="inf_decoder_hidden_states")
-
-dec_lstm_inf = model.get_layer("decoder_lstm")
-dec_out_inf, state_h_inf, state_c_inf = dec_lstm_inf(
-    dec_embedding_inf,
-    initial_state=[dec_state_input_h, dec_state_input_c]
+data_collator = DataCollatorForSeq2Seq(
+    tokenizer,
+    model=model,
+    padding=True,
+    label_pad_token_id=-100
 )
 
-attention_layer_inf = model.get_layer("attention_layer")
-attn_out_inf = attention_layer_inf([dec_out_inf, dec_hidden_state_input])
-
-concat_layer_inf = model.get_layer("concat_layer1")
-merge_inf = concat_layer_inf([dec_out_inf, attn_out_inf])
-
-dec_dense_inf = model.get_layer("dense_layer")
-dec_final_out = dec_dense_inf(merge_inf)
-
-dec_model = Model(
-    [decoder_input_tensor, dec_hidden_state_input, dec_state_input_h, dec_state_input_c],
-    [dec_final_out, state_h_inf, state_c_inf]
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=test_dataset,
+    processing_class=tokenizer,
+    data_collator=data_collator,
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
 )
 
-reverse_target_word_index = tr_tokenizer.index_word
-target_word_index = tr_tokenizer.word_index
-reverse_target_word_index[0] = ' '
+print("\nStarting training...")
+trainer.train()
 
-# FIX 6: Decoder state bug fixed — dec_h/dec_c update each step,
-# en_out stays fixed as the encoder context throughout generation
-def decode_sequence(en_out, en_h, en_c):
-    target_seq = np.zeros((1, 1))
-    target_seq[0, 0] = target_word_index['sos']
-    dec_h, dec_c = en_h, en_c  # initialize decoder state from encoder final state
+model.save_pretrained("variables_t5/final_model")
+tokenizer.save_pretrained("variables_t5/final_model")
+print("\nModel and tokenizer saved to variables_t5/final_model/")
 
-    decoded_sentence = ""
-    while True:
-        output_words, dec_h, dec_c = dec_model.predict(
-            [target_seq, en_out, dec_h, dec_c], verbose=0
-        )
+# ── 9. INFERENCE HELPER ───────────────────────────────────────────────────────
+def predict_summary(review_text):
+    """
+    Generate a summary for a single review string.
+    Uses beam search (num_beams=4) which tracks 4 candidate sequences
+    simultaneously and picks the best — much more coherent than token
+    by token sampling used in the LSTM version.
+    """
+    input_text = "summarize: " + clean_for_t5(review_text)
+    input_ids = tokenizer(
+        input_text,
+        max_length=MAX_INPUT_LEN,
+        truncation=True,
+        return_tensors="pt"
+    ).input_ids.to(device)  # send input to MPS
 
-        preds = output_words[0, -1, :]
-        temperature = 0.7
-        preds = np.log(preds + 1e-10) / temperature
-        exp_preds = np.exp(preds)
-        preds = exp_preds / np.sum(exp_preds)
+    output_ids = model.generate(
+        input_ids,
+        max_new_tokens=MAX_TARGET_LEN,
+        num_beams=4,            # beam search over 4 candidates
+        early_stopping=True,    # stop when all beams hit end token
+        no_repeat_ngram_size=2  # prevent repeating the same bigram
+    )
+    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-        word_index = np.random.choice(range(len(preds)), p=preds)
-        text_word = reverse_target_word_index.get(word_index, '')
+# ── 10. ROUGE EVALUATION ──────────────────────────────────────────────────────
+print("\n--- COMPUTING ROUGE SCORES ON 200 TEST SAMPLES ---")
+print("(Running inference on 200 samples, this takes a few minutes...)")
 
-        if text_word == 'eos' or len(decoded_sentence.split()) >= (max_tr_len - 1):
-            break
+scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+rouge_scores = {'rouge1': [], 'rouge2': [], 'rougeL': []}
+sample_indices = np.random.choice(len(test_texts), min(200, len(test_texts)), replace=False)
 
-        if word_index != 0 and text_word not in ('sos', '<OOV>'):
-            decoded_sentence += text_word + " "
+for idx, i in enumerate(sample_indices):
+    actual    = test_summaries[i]
+    predicted = predict_summary(test_texts[i])
+    if predicted and actual:
+        result = scorer.score(actual, predicted)
+        for k in rouge_scores:
+            rouge_scores[k].append(result[k].fmeasure)
+    if (idx + 1) % 50 == 0:
+        print(f"  {idx + 1}/200 done...")
 
-        target_seq = np.zeros((1, 1))
-        target_seq[0, 0] = word_index
+print(f"\nROUGE-1 : {np.mean(rouge_scores['rouge1']):.4f}  (unigram word overlap)")
+print(f"ROUGE-2 : {np.mean(rouge_scores['rouge2']):.4f}  (bigram word overlap)")
+print(f"ROUGE-L : {np.mean(rouge_scores['rougeL']):.4f}  (longest common subsequence)")
+print(f"(ROUGE-1 above 0.3 is solid for this task)")
 
-    return decoded_sentence.strip()
+# ── 11. SAMPLE PREDICTIONS VS GROUND TRUTH ───────────────────────────────────
+print("\n--- SAMPLE PREDICTIONS VS GROUND TRUTH ---")
+for i in sample_indices[:10]:
+    predicted = predict_summary(test_texts[i])
+    print(f"Review    : {test_texts[i][:80]}...")
+    print(f"Actual    : {test_summaries[i]}")
+    print(f"Predicted : {predicted}")
+    print()
 
-# Interactive loop
+# ── 12. INTERACTIVE LOOP ──────────────────────────────────────────────────────
+print("\n--- INTERACTIVE MODE ---")
+print("T5 works on any text, not just food reviews!")
 while True:
     inp_review = input("\nEnter Review (or 'quit' to exit): ")
     if inp_review.lower() == 'quit':
         break
-
-    print("Processing...")
-    inp_review_cleaned = clean(inp_review)
-    inp_review_joined = ' '.join(inp_review_cleaned)
-
-    inp_x = in_tokenizer.texts_to_sequences([inp_review_joined])
-    inp_x = pad_sequences(inp_x, maxlen=max_in_len, padding='post')
-
-    en_out, en_h, en_c = en_model.predict(inp_x.reshape(1, max_in_len), verbose=0)
-    summary = decode_sequence(en_out, en_h, en_c)
-
+    summary = predict_summary(inp_review)
     print("Predicted summary:", summary)
