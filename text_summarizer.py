@@ -37,10 +37,10 @@ print("\nLoading Amazon Fine Food Reviews...")
 path = kagglehub.dataset_download("snap/amazon-fine-food-reviews")
 csv_path = os.path.join(path, "Reviews.csv")
 
-df = pd.read_csv(csv_path, nrows=170000)
+df = pd.read_csv(csv_path, nrows=200000)
 
-pos_df = df[df['Score'] >= 4].head(30000)
-neg_df = df[df['Score'] <= 2].head(30000)
+pos_df = df[df['Score'] >= 4].head(40000)
+neg_df = df[df['Score'] <= 2].head(40000)
 print(f"Pos: {len(pos_df)} | Neg: {len(neg_df)}")
 
 df = pd.concat([pos_df, neg_df]).sample(frac=1, random_state=0).reset_index(drop=True)
@@ -154,20 +154,23 @@ os.makedirs("variables_t5", exist_ok=True)
 
 training_args = TrainingArguments(
     output_dir="variables_t5/checkpoints",
-    num_train_epochs=5,
+    num_train_epochs=10,
     per_device_train_batch_size=32,  # increased from 16 — MPS handles this fine
     per_device_eval_batch_size=32,
     warmup_steps=200,                # gradual LR warmup prevents early instability
     weight_decay=0.01,               # L2 regularization
-    learning_rate=3e-4,
+    learning_rate=1e-4,
     eval_strategy="epoch",
     save_strategy="epoch",
+    save_total_limit = 1,
+    save_only_model=True,
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
     logging_dir="variables_t5/logs",
     logging_steps=50,
     fp16=False,                      # MPS does not support fp16
-    use_cpu=False,                    # tell HuggingFace not to look for CUDA
+    use_cpu=False,
+    dataloader_pin_memory=False,     # tell HuggingFace not to look for CUDA
     report_to="none",                # disable wandb / tensorboard
 )
 
